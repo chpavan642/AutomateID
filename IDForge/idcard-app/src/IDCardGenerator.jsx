@@ -1,10 +1,17 @@
+/**
+ * ============================================================
+ * ID CARD GENERATOR - Professional SaaS Application
+ * Built with React + Tailwind CSS
+ * Features: Template Designer, Excel Upload, Batch Generation
+ * ============================================================
+ */
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "https://cdn.sheetjs.com/xlsx-0.20.0/package/xlsx.mjs";
 
 // ─── CONSTANTS ───────────────────────────────────────────────
-const CARD_WIDTH = 323;   // 3.375 inches at 96dpi
-const CARD_HEIGHT = 204;  // 2.125 inches at 96dpi
+const CARD_WIDTH = 600;   // 3.375 inches at 96dpi
+const CARD_HEIGHT = 300;  // 2.125 inches at 96dpi
 
 const FONT_FAMILIES = ["Inter", "Georgia", "Courier New", "Arial Black", "Trebuchet MS", "Palatino", "Impact"];
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48];
@@ -519,8 +526,13 @@ const TemplateCanvas = ({ template, elements, selectedId, onSelect, onUpdateElem
   };
 
   if (bgImage) cardStyle.backgroundImage = `url(${bgImage})`;
-  cardStyle.backgroundSize = "cover";
+  // bgZoom: number 100–300 → e.g. "150%" means zoomed in 50%.
+  // Falls back to "cover" if no bgZoom is set (preserves old behaviour).
+  cardStyle.backgroundSize = bgImage
+    ? (template.bgZoom ? `${template.bgZoom}%` : "cover")
+    : "cover";
   cardStyle.backgroundPosition = "center";
+  cardStyle.backgroundRepeat = "no-repeat";
 
   return (
     <div
@@ -609,6 +621,17 @@ export default function IDCardGenerator() {
   const [selectedId, setSelectedId] = useState(null);
   const [templateName, setTemplateName] = useState("My ID Card");
 
+  // ── EDITOR CANVAS ZOOM ──
+  // Controls how large the ID card canvas appears in the editor.
+  // 1.0 = original size (323×204px), 1.5 = 50% bigger, 2.0 = double, etc.
+  const [canvasZoom, setCanvasZoom] = useState(1.5);
+
+  // ── BACKGROUND IMAGE ZOOM ──
+  // Controls background-size of the uploaded bg image on the card.
+  // Stored as a percentage string e.g. "120%" or "cover".
+  // We store a numeric value 100–300 and apply it as background-size.
+  const [bgZoom, setBgZoom] = useState(100);
+
   // Excel state
   const [excelData, setExcelData] = useState([]);
   const [columns, setColumns] = useState([]);
@@ -619,6 +642,72 @@ export default function IDCardGenerator() {
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState(0);
   const [previewCard, setPreviewCard] = useState(null);
+
+  // ─── MANUAL PHOTO ASSIGNMENT STATE ───────────────────────────
+  // cardPhotos: { [cardId]: base64DataUrl }
+  // Stores manually uploaded photos keyed by card ID.
+  // This is separate from Excel-mapped photos so neither overwrites the other.
+  const [cardPhotos, setCardPhotos] = useState({});
+
+  // Track which card is currently showing the photo upload dropzone
+  const [photoUploadTarget, setPhotoUploadTarget] = useState(null);
+
+  // Track drag-over state for each card's drop zone: { [cardId]: boolean }
+  const [dragOverCard, setDragOverCard] = useState({});
+
+  /**
+   * Assign a manually uploaded photo to a specific card.
+   * Reads the file as base64 and stores it in cardPhotos state.
+   * Also updates the card's data so TemplateCanvas renders the new photo immediately.
+   * @param {string} cardId - The generated card's unique ID
+   * @param {File} file - The image file from input or drag-and-drop
+   */
+  const assignPhotoToCard = (cardId, file) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64 = e.target.result;
+      // Store in cardPhotos map for fast lookup
+      setCardPhotos(prev => ({ ...prev, [cardId]: base64 }));
+      // Also close the upload panel for this card
+      setPhotoUploadTarget(null);
+      // If the card is currently open in preview modal, refresh it
+      setPreviewCard(prev => prev && prev.id === cardId ? { ...prev, _photoOverride: base64 } : prev);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  /**
+   * Remove a manually assigned photo from a card,
+   * reverting it back to the Excel-mapped photo (if any) or placeholder.
+   * @param {string} cardId - The generated card's unique ID
+   */
+  const removePhotoFromCard = (cardId) => {
+    setCardPhotos(prev => {
+      const next = { ...prev };
+      delete next[cardId];
+      return next;
+    });
+    setPreviewCard(prev => prev && prev.id === cardId ? { ...prev, _photoOverride: null } : prev);
+  };
+
+  /**
+   * Build the effective data object for a card by merging:
+   * 1. Original Excel row data
+   * 2. Manually uploaded photo (overrides Excel photo if present)
+   * This is passed to TemplateCanvas as the `data` prop.
+   * @param {object} card - A generated card object
+   * @returns {object} Merged data for rendering
+   */
+  const getCardRenderData = (card) => {
+    const manualPhoto = cardPhotos[card.id];
+    if (!manualPhoto) return card.data;
+    // Find which element is the image type and what dataKey it uses
+    const imageEl = elements.find(el => el.type === "image" && el.dataKey);
+    if (!imageEl) return { ...card.data, _manualPhoto: manualPhoto };
+    // Inject the manual photo under the same key the template expects
+    return { ...card.data, [imageEl.dataKey]: manualPhoto };
+  };
 
   // Derived
   const selectedElement = elements.find(e => e.id === selectedId);
@@ -714,9 +803,12 @@ export default function IDCardGenerator() {
   };
 
   // ── EXPORT (HTML print) ──
+  // Uses getCardRenderData() so manually uploaded photos are included in export
   const exportPDF = () => {
     const printWin = window.open("", "_blank");
     const cardHTMLs = generatedCards.slice(0, 200).map(card => {
+      // ← Use merged data (Excel + manual photo override)
+      const renderData = getCardRenderData(card);
       const cardStyle = `
         width:${CARD_WIDTH}px;height:${CARD_HEIGHT}px;
         background:${activeTemplate.background || DEFAULT_TEMPLATES[0].bg};
@@ -725,7 +817,7 @@ export default function IDCardGenerator() {
         ${activeTemplate.bgImage ? `background-image:url(${activeTemplate.bgImage});background-size:cover;` : ""}
       `;
       const elHTMLs = elements.map(el => {
-        const val = el.dataKey && card.data[el.dataKey] ? card.data[el.dataKey] : el.defaultValue || "";
+        const val = el.dataKey && renderData[el.dataKey] ? renderData[el.dataKey] : el.defaultValue || "";
         let inner = "";
         if (el.type === "text") {
           inner = `<div style="position:absolute;left:${el.x}px;top:${el.y}px;width:${el.width}px;height:${el.height}px;
@@ -760,13 +852,15 @@ export default function IDCardGenerator() {
 
   const downloadSingle = (card) => {
     const win = window.open("", "_blank");
+    // ← Use merged data so manually uploaded photo appears in single download too
+    const renderData = getCardRenderData(card);
     const cardStyle = `
       width:${CARD_WIDTH}px;height:${CARD_HEIGHT}px;
       background:${activeTemplate.background || DEFAULT_TEMPLATES[0].bg};
       border-radius:8px;overflow:hidden;position:relative;margin:40px auto;
     `;
     const elHTMLs = elements.map(el => {
-      const val = el.dataKey && card.data[el.dataKey] ? card.data[el.dataKey] : el.defaultValue || "";
+      const val = el.dataKey && renderData[el.dataKey] ? renderData[el.dataKey] : el.defaultValue || "";
       if (el.type === "text") {
         return `<div style="position:absolute;left:${el.x}px;top:${el.y}px;width:${el.width}px;height:${el.height}px;color:${el.color||"#fff"};font-size:${el.fontSize||12}px;font-family:${el.fontFamily||"sans-serif"};font-weight:${el.fontWeight||"normal"};text-align:${el.align||"left"};display:flex;align-items:center;padding:2px 4px;box-sizing:border-box;">${val}</div>`;
       }
@@ -783,7 +877,10 @@ export default function IDCardGenerator() {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (evt) => setActiveTemplate(t => ({ ...t, bgImage: evt.target.result }));
+    reader.onload = (evt) => {
+      setBgZoom(100); // reset zoom to 100% on new upload
+      setActiveTemplate(t => ({ ...t, bgImage: evt.target.result, bgZoom: 100 }));
+    };
     reader.readAsDataURL(file);
   };
 
@@ -1014,40 +1111,153 @@ export default function IDCardGenerator() {
               </div>
 
               {/* Canvas Area */}
-              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", background: "#0f172a", position: "relative", overflow: "auto" }}>
-                <div style={{ transform: "scale(1)", transformOrigin: "center" }}>
-                  {/* Template name input */}
-                  <div style={{ marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                    <input
-                      value={templateName}
-                      onChange={e => setTemplateName(e.target.value)}
-                      style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#f1f5f9", padding: "6px 10px", fontSize: 13, width: 200 }}
-                      placeholder="Template name..."
-                    />
-                    <select
-                      value={activeTemplate.background || ""}
-                      onChange={e => setActiveTemplate(t => ({ ...t, background: e.target.value }))}
-                      style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#f1f5f9", padding: "6px 10px", fontSize: 12 }}
-                    >
-                      {DEFAULT_TEMPLATES.map(t => (
-                        <option key={t.id} value={t.bg}>{t.name}</option>
-                      ))}
-                    </select>
-                  </div>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#0f172a", position: "relative", overflow: "hidden" }}>
 
-                  {/* The card canvas */}
-                  <TemplateCanvas
-                    template={activeTemplate}
-                    elements={elements}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
-                    onUpdateElement={updateElement}
-                    data={excelData[0] || {}}
-                  />
+                {/* ── Zoom toolbar (sits above the canvas) ── */}
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "8px 16px", borderBottom: "1px solid #1e293b",
+                  background: "#0f172a", flexShrink: 0,
+                }}>
+                  {/* Canvas zoom controls */}
+                  <span style={{ fontSize: 11, color: "#475569", whiteSpace: "nowrap" }}>🔍 Canvas Zoom</span>
+                  <button
+                    title="Zoom out"
+                    onClick={() => setCanvasZoom(z => Math.max(0.5, +(z - 0.1).toFixed(1)))}
+                    style={{ width: 26, height: 26, borderRadius: 4, border: "1px solid #334155", background: "#1e293b", color: "#94a3b8", cursor: "pointer", fontSize: 14, lineHeight: 1 }}
+                  >−</button>
+                  <span style={{ fontSize: 12, color: "#a5b4fc", minWidth: 38, textAlign: "center", fontWeight: 700 }}>
+                    {Math.round(canvasZoom * 100)}%
+                  </span>
+                  <button
+                    title="Zoom in"
+                    onClick={() => setCanvasZoom(z => Math.min(3.0, +(z + 0.1).toFixed(1)))}
+                    style={{ width: 26, height: 26, borderRadius: 4, border: "1px solid #334155", background: "#1e293b", color: "#94a3b8", cursor: "pointer", fontSize: 14, lineHeight: 1 }}
+                  >+</button>
+                  {/* Preset zoom buttons */}
+                  {[0.75, 1.0, 1.5, 2.0].map(z => (
+                    <button key={z}
+                      onClick={() => setCanvasZoom(z)}
+                      style={{
+                        padding: "3px 8px", borderRadius: 4, fontSize: 11,
+                        border: `1px solid ${canvasZoom === z ? "#6366f1" : "#334155"}`,
+                        background: canvasZoom === z ? "#312e81" : "#1e293b",
+                        color: canvasZoom === z ? "#a5b4fc" : "#64748b",
+                        cursor: "pointer",
+                      }}
+                    >{z * 100}%</button>
+                  ))}
 
-                  {/* Size info */}
-                  <div style={{ marginTop: 8, fontSize: 11, color: "#475569", textAlign: "center" }}>
-                    {CARD_WIDTH} × {CARD_HEIGHT}px (3.375" × 2.125") — Standard CR80 Size
+                  <div style={{ width: 1, height: 20, background: "#334155", margin: "0 4px" }} />
+
+                  {/* Background image zoom slider — only visible when a bg image is uploaded */}
+                  {activeTemplate.bgImage && (
+                    <>
+                      <span style={{ fontSize: 11, color: "#475569", whiteSpace: "nowrap" }}>🖼 BG Zoom</span>
+                      <button
+                        title="BG zoom out"
+                        onClick={() => {
+                          const next = Math.max(50, bgZoom - 10);
+                          setBgZoom(next);
+                          setActiveTemplate(t => ({ ...t, bgZoom: next }));
+                        }}
+                        style={{ width: 26, height: 26, borderRadius: 4, border: "1px solid #334155", background: "#1e293b", color: "#94a3b8", cursor: "pointer", fontSize: 14, lineHeight: 1 }}
+                      >−</button>
+                      <input
+                        type="range"
+                        min={50} max={300} step={5}
+                        value={bgZoom}
+                        onChange={e => {
+                          const val = Number(e.target.value);
+                          setBgZoom(val);
+                          // Live-update the template so card preview updates instantly
+                          setActiveTemplate(t => ({ ...t, bgZoom: val }));
+                        }}
+                        style={{ width: 90, accentColor: "#6366f1" }}
+                        title={`Background zoom: ${bgZoom}%`}
+                      />
+                      <button
+                        title="BG zoom in"
+                        onClick={() => {
+                          const next = Math.min(300, bgZoom + 10);
+                          setBgZoom(next);
+                          setActiveTemplate(t => ({ ...t, bgZoom: next }));
+                        }}
+                        style={{ width: 26, height: 26, borderRadius: 4, border: "1px solid #334155", background: "#1e293b", color: "#94a3b8", cursor: "pointer", fontSize: 14, lineHeight: 1 }}
+                      >+</button>
+                      <span style={{ fontSize: 12, color: "#f0a500", fontWeight: 700, minWidth: 36 }}>{bgZoom}%</span>
+                      {/* Reset bg zoom */}
+                      <button
+                        onClick={() => { setBgZoom(100); setActiveTemplate(t => ({ ...t, bgZoom: 100 })); }}
+                        style={{ padding: "3px 8px", borderRadius: 4, fontSize: 11, border: "1px solid #334155", background: "#1e293b", color: "#64748b", cursor: "pointer" }}
+                        title="Reset BG zoom to 100%"
+                      >Reset</button>
+                      {/* Remove bg image */}
+                      <button
+                        onClick={() => { setBgZoom(100); setActiveTemplate(t => ({ ...t, bgImage: null, bgZoom: 100 })); }}
+                        style={{ padding: "3px 8px", borderRadius: 4, fontSize: 11, border: "1px solid #7f1d1d", background: "#3b0000", color: "#fca5a5", cursor: "pointer" }}
+                        title="Remove background image"
+                      >✕ Remove BG</button>
+                    </>
+                  )}
+                </div>
+
+                {/* ── Scrollable canvas workspace ── */}
+                <div style={{ flex: 1, overflow: "auto", display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}>
+                  {/*
+                    The outer wrapper is sized to fit the SCALED card so the scroll
+                    container knows the real dimensions. We use an explicit width/height
+                    on the wrapper equal to the scaled card size so centering works even
+                    when the card is larger than the viewport.
+                  */}
+                  <div style={{
+                    display: "flex", flexDirection: "column", alignItems: "center",
+                    // Let the wrapper grow so the scrollable area always fits the card
+                    minWidth: CARD_WIDTH * canvasZoom + 40,
+                  }}>
+                    {/* Template name + preset selector row */}
+                    <div style={{ marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
+                      <input
+                        value={templateName}
+                        onChange={e => setTemplateName(e.target.value)}
+                        style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#f1f5f9", padding: "6px 10px", fontSize: 13, width: 200 }}
+                        placeholder="Template name..."
+                      />
+                      <select
+                        value={activeTemplate.background || ""}
+                        onChange={e => setActiveTemplate(t => ({ ...t, background: e.target.value }))}
+                        style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#f1f5f9", padding: "6px 10px", fontSize: 12 }}
+                      >
+                        {DEFAULT_TEMPLATES.map(t => (
+                          <option key={t.id} value={t.bg}>{t.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* The card canvas — scaled by canvasZoom using CSS transform */}
+                    <div style={{
+                      // transform-origin top-left so the scroll container sizes correctly
+                      transform: `scale(${canvasZoom})`,
+                      transformOrigin: "top center",
+                      // Reserve space equal to scaled size so layout doesn't collapse
+                      marginBottom: CARD_HEIGHT * (canvasZoom - 1),
+                    }}>
+                      <TemplateCanvas
+                        template={activeTemplate}
+                        elements={elements}
+                        selectedId={selectedId}
+                        onSelect={setSelectedId}
+                        onUpdateElement={updateElement}
+                        data={excelData[0] || {}}
+                      />
+                    </div>
+
+                    {/* Size info label */}
+                    <div style={{ marginTop: 8, fontSize: 11, color: "#475569", textAlign: "center" }}>
+                      {CARD_WIDTH} × {CARD_HEIGHT}px &nbsp;·&nbsp; 3.375″ × 2.125″ (CR80)
+                      &nbsp;·&nbsp; Canvas {Math.round(canvasZoom * 100)}%
+                      {activeTemplate.bgImage && <>&nbsp;·&nbsp; BG {bgZoom}%</>}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1272,38 +1482,188 @@ export default function IDCardGenerator() {
                 </div>
               )}
 
-              {/* Card grid */}
+              {/* ── CARD GRID WITH MANUAL PHOTO UPLOAD ── */}
               {generatedCards.length > 0 && (
                 <div>
-                  <div style={{ marginBottom: 12, color: "#64748b", fontSize: 13 }}>
-                    Showing {Math.min(generatedCards.length, 50)} of {generatedCards.length} cards
-                    {generatedCards.length > 50 && " (scroll to see more, export to get all)"}
+                  {/* Stats bar */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16, padding: "10px 14px", background: "#1e293b", borderRadius: 8, border: "1px solid #334155" }}>
+                    <span style={{ color: "#64748b", fontSize: 13 }}>
+                      Showing {Math.min(generatedCards.length, 50)} of {generatedCards.length} cards
+                      {generatedCards.length > 50 && " (first 50 shown)"}
+                    </span>
+                    <span style={{ color: "#10b981", fontSize: 12 }}>
+                      📷 {Object.keys(cardPhotos).length} photos assigned manually
+                    </span>
+                    {Object.keys(cardPhotos).length > 0 && (
+                      <button
+                        onClick={() => { if (window.confirm("Clear all manually uploaded photos?")) setCardPhotos({}); }}
+                        style={{ marginLeft: "auto", padding: "4px 10px", background: "#7f1d1d", border: "none", borderRadius: 4, color: "#fca5a5", cursor: "pointer", fontSize: 11 }}
+                      >
+                        🗑 Clear All Photos
+                      </button>
+                    )}
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
-                    {generatedCards.slice(0, 50).map(card => (
-                      <div key={card.id} style={{ position: "relative" }}>
-                        <div style={{ transform: "scale(0.6)", transformOrigin: "top left", width: CARD_WIDTH, height: CARD_HEIGHT }}>
-                          <TemplateCanvas
-                            template={activeTemplate}
-                            elements={elements}
-                            selectedId={null}
-                            onSelect={() => setPreviewCard(card)}
-                            onUpdateElement={() => {}}
-                            data={card.data}
-                          />
+
+                  {/* Card grid — each card gets photo upload controls */}
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
+                    {generatedCards.slice(0, 50).map(card => {
+                      const hasManualPhoto = !!cardPhotos[card.id];
+                      // Check if Excel data already has a photo
+                      const imageEl = elements.find(el => el.type === "image" && el.dataKey);
+                      const hasExcelPhoto = imageEl && !!card.data[imageEl.dataKey];
+                      const hasAnyPhoto = hasManualPhoto || hasExcelPhoto;
+                      const isUploadOpen = photoUploadTarget === card.id;
+                      const isDragOver = !!dragOverCard[card.id];
+                      const renderData = getCardRenderData(card);
+                      const scaledW = Math.round(CARD_WIDTH * 0.6);
+                      const scaledH = Math.round(CARD_HEIGHT * 0.6);
+
+                      return (
+                        <div key={card.id} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+
+                          {/* ── Card Preview ── */}
+                          <div style={{ position: "relative", width: scaledW, height: scaledH }}>
+                            <div style={{ transform: "scale(0.6)", transformOrigin: "top left", width: CARD_WIDTH, height: CARD_HEIGHT, pointerEvents: "none" }}>
+                              <TemplateCanvas
+                                template={activeTemplate}
+                                elements={elements}
+                                selectedId={null}
+                                onSelect={() => {}}
+                                onUpdateElement={() => {}}
+                                data={renderData}
+                              />
+                            </div>
+
+                            {/* Photo status badge */}
+                            <div style={{
+                              position: "absolute", top: 4, right: 4,
+                              background: hasManualPhoto ? "#065f46" : hasExcelPhoto ? "#1e3a5f" : "#451a03",
+                              border: `1px solid ${hasManualPhoto ? "#10b981" : hasExcelPhoto ? "#3b82f6" : "#f59e0b"}`,
+                              borderRadius: 10, padding: "2px 7px", fontSize: 9, fontWeight: 600,
+                              color: hasManualPhoto ? "#6ee7b7" : hasExcelPhoto ? "#93c5fd" : "#fbbf24",
+                            }}>
+                              {hasManualPhoto ? "📷 Manual" : hasExcelPhoto ? "📊 Excel" : "⚠ No Photo"}
+                            </div>
+                          </div>
+
+                          {/* ── Photo Upload Panel (expanded) ── */}
+                          {isUploadOpen && (
+                            <div style={{
+                              width: scaledW,
+                              background: "#0f172a",
+                              border: `2px dashed ${isDragOver ? "#6366f1" : "#334155"}`,
+                              borderRadius: 8,
+                              padding: 10,
+                              transition: "border-color 0.15s",
+                            }}
+                              onDragOver={e => {
+                                e.preventDefault();
+                                setDragOverCard(prev => ({ ...prev, [card.id]: true }));
+                              }}
+                              onDragLeave={() => setDragOverCard(prev => ({ ...prev, [card.id]: false }))}
+                              onDrop={e => {
+                                e.preventDefault();
+                                setDragOverCard(prev => ({ ...prev, [card.id]: false }));
+                                const file = e.dataTransfer.files[0];
+                                if (file) assignPhotoToCard(card.id, file);
+                              }}
+                            >
+                              {/* Drop zone */}
+                              <div style={{ textAlign: "center", marginBottom: 8 }}>
+                                <div style={{ fontSize: 18, marginBottom: 4 }}>{isDragOver ? "⬇️" : "📸"}</div>
+                                <div style={{ fontSize: 10, color: "#64748b", marginBottom: 6 }}>
+                                  {isDragOver ? "Drop to assign photo" : "Drag & drop or click to upload"}
+                                </div>
+                                {/* File input trigger */}
+                                <label style={{ cursor: "pointer" }}>
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    style={{ display: "none" }}
+                                    onChange={e => {
+                                      const file = e.target.files[0];
+                                      if (file) assignPhotoToCard(card.id, file);
+                                      e.target.value = ""; // reset so same file can be re-selected
+                                    }}
+                                  />
+                                  <span style={{
+                                    display: "inline-block",
+                                    padding: "5px 12px", background: "#6366f1",
+                                    borderRadius: 5, color: "white", fontSize: 11, fontWeight: 600,
+                                  }}>
+                                    Choose Photo
+                                  </span>
+                                </label>
+                              </div>
+
+                              {/* Thumbnail preview if manual photo exists */}
+                              {hasManualPhoto && (
+                                <div style={{ textAlign: "center" }}>
+                                  <img
+                                    src={cardPhotos[card.id]}
+                                    alt="preview"
+                                    style={{ width: 48, height: 48, objectFit: "cover", borderRadius: 6, border: "2px solid #10b981" }}
+                                  />
+                                  <div style={{ fontSize: 9, color: "#10b981", marginTop: 3 }}>✓ Assigned</div>
+                                </div>
+                              )}
+
+                              {/* Cancel button */}
+                              <button
+                                onClick={() => setPhotoUploadTarget(null)}
+                                style={{ width: "100%", marginTop: 6, padding: "3px", background: "transparent", border: "1px solid #334155", borderRadius: 4, color: "#64748b", cursor: "pointer", fontSize: 10 }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          )}
+
+                          {/* ── Action Buttons Row ── */}
+                          <div style={{ width: scaledW, display: "flex", gap: 3 }}>
+                            {/* Preview */}
+                            <button
+                              onClick={() => setPreviewCard({ ...card, _photoOverride: cardPhotos[card.id] || null })}
+                              style={{ flex: 1, padding: "4px 2px", background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#94a3b8", cursor: "pointer", fontSize: 9 }}
+                            >👁</button>
+
+                            {/* Upload / Replace Photo */}
+                            <button
+                              onClick={() => setPhotoUploadTarget(isUploadOpen ? null : card.id)}
+                              style={{
+                                flex: 2, padding: "4px 3px",
+                                background: isUploadOpen ? "#312e81" : hasManualPhoto ? "#164e63" : "#1e3a5f",
+                                border: `1px solid ${isUploadOpen ? "#6366f1" : hasManualPhoto ? "#0891b2" : "#334155"}`,
+                                borderRadius: 4, color: isUploadOpen ? "#a5b4fc" : hasManualPhoto ? "#67e8f9" : "#93c5fd",
+                                cursor: "pointer", fontSize: 9, fontWeight: 600,
+                              }}
+                            >
+                              {hasManualPhoto ? "🔄 Replace" : "📷 Photo"}
+                            </button>
+
+                            {/* Remove manual photo (only shown if manual photo exists) */}
+                            {hasManualPhoto && (
+                              <button
+                                onClick={() => removePhotoFromCard(card.id)}
+                                title="Remove manually uploaded photo"
+                                style={{ flex: 1, padding: "4px 2px", background: "#3b0764", border: "1px solid #7c3aed", borderRadius: 4, color: "#c4b5fd", cursor: "pointer", fontSize: 9 }}
+                              >✕</button>
+                            )}
+
+                            {/* Save single */}
+                            <button
+                              onClick={() => downloadSingle(card)}
+                              style={{ flex: 1, padding: "4px 2px", background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#94a3b8", cursor: "pointer", fontSize: 9 }}
+                            >↓</button>
+                          </div>
+
+                          {/* Row label */}
+                          <div style={{ width: scaledW, fontSize: 9, color: "#475569", textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            #{card.index + 1} {Object.values(card.data)[0] || ""}
+                          </div>
+
                         </div>
-                        <div style={{ width: Math.round(CARD_WIDTH * 0.6), height: Math.round(CARD_HEIGHT * 0.6), display: "flex", gap: 4, marginTop: 4 }}>
-                          <button
-                            onClick={() => setPreviewCard(card)}
-                            style={{ flex: 1, padding: "3px", background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#94a3b8", cursor: "pointer", fontSize: 10 }}
-                          >👁 Preview</button>
-                          <button
-                            onClick={() => downloadSingle(card)}
-                            style={{ flex: 1, padding: "3px", background: "#1e293b", border: "1px solid #334155", borderRadius: 4, color: "#94a3b8", cursor: "pointer", fontSize: 10 }}
-                          >↓ Save</button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1397,7 +1757,33 @@ export default function IDCardGenerator() {
           onClick={() => setPreviewCard(null)}
         >
           <div onClick={e => e.stopPropagation()}>
-            <div style={{ marginBottom: 12, display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <div style={{ marginBottom: 12, display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+              {/* Show photo status in modal header */}
+              {cardPhotos[previewCard.id] && (
+                <span style={{ fontSize: 11, color: "#10b981", marginRight: 8 }}>📷 Manual photo active</span>
+              )}
+              {/* Upload photo directly from the modal */}
+              <label style={{ cursor: "pointer" }}>
+                <input
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={e => {
+                    const file = e.target.files[0];
+                    if (file) assignPhotoToCard(previewCard.id, file);
+                    e.target.value = "";
+                  }}
+                />
+                <span style={{ padding: "6px 14px", background: "#164e63", border: "1px solid #0891b2", borderRadius: 6, color: "#67e8f9", cursor: "pointer", fontSize: 13 }}>
+                  📷 {cardPhotos[previewCard.id] ? "Replace Photo" : "Upload Photo"}
+                </span>
+              </label>
+              {cardPhotos[previewCard.id] && (
+                <button
+                  onClick={() => removePhotoFromCard(previewCard.id)}
+                  style={{ padding: "6px 12px", background: "#3b0764", border: "1px solid #7c3aed", borderRadius: 6, color: "#c4b5fd", cursor: "pointer", fontSize: 13 }}
+                >✕ Remove Photo</button>
+              )}
               <button
                 onClick={() => downloadSingle(previewCard)}
                 style={{ padding: "6px 14px", background: "#6366f1", border: "none", borderRadius: 6, color: "white", cursor: "pointer", fontSize: 13 }}
@@ -1407,13 +1793,14 @@ export default function IDCardGenerator() {
                 style={{ padding: "6px 14px", background: "#334155", border: "none", borderRadius: 6, color: "#f1f5f9", cursor: "pointer", fontSize: 13 }}
               >✕ Close</button>
             </div>
+            {/* ← Pass merged data (Excel + manual photo) to the preview canvas */}
             <TemplateCanvas
               template={activeTemplate}
               elements={elements}
               selectedId={null}
               onSelect={() => {}}
               onUpdateElement={() => {}}
-              data={previewCard.data}
+              data={getCardRenderData(previewCard)}
             />
             <div style={{ marginTop: 12, fontSize: 12, color: "#64748b", textAlign: "center" }}>
               Record #{previewCard.index + 1} — {Object.entries(previewCard.data).slice(0, 3).map(([k,v]) => `${k}: ${v}`).join(" | ")}
