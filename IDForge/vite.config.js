@@ -3,8 +3,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
-  // Replace 'idcard-app' with YOUR actual GitHub repo name
-  base: '/IDForge/',
+  base: '/AutomateID/',   // ← PUT YOUR EXACT REPO NAME HERE
   server: {
     host: '0.0.0.0',
     port: 5173,
